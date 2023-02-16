@@ -1,0 +1,18 @@
+---
+proxmoxvms:
+  hosts:
+    vmmain:
+      ansible_host: 
+      ansible_ssh_user: 
+      ansible_ssh_password:
+      ansible_port: 
+    vmworker1:
+      ansible_host: 
+      ansible_ssh_user: 
+      ansible_ssh_password:
+      ansible_port: 
+    vmworker2:
+      ansible_host: 
+      ansible_ssh_user: 
+      ansible_ssh_password:
+      ansible_port: 

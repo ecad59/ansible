@@ -1,0 +1,309 @@
+---
+- name: Nodes configuration
+  hosts: proxmoxnodes
+  serial: 3
+
+  vars: 
+    main_nat_ip: "##MAIN_NAT_IP##"
+    worker1_nat_ip: "##WORKER1_NAT_IP##"
+    worker2_nat_ip: "##WORKER2_NAT_IP##"
+
+    main_hostname: "##MAIN_HOSTNAME##"
+    worker1_hostname: "##WORKER1_HOSTNAME##"
+    worker2_hostname: "##WORKER2_HOSTNAME##"
+
+    main_node: "##MAIN_NODE##"
+    worker1_node: "##WORKER1_NODE##"
+    worker2_node: "##WORKER2_NODE##"
+
+    main_ip: "##MAIN_IP##"
+    worker1_ip : "##WORKER1_IP##"
+    worker2_ip: "##WORKER2_IP##"
+
+    main_ci_user: "##MAIN_CI_USER##"
+    main_ci_password: "##MAIN_CI_PASSWORD##"
+
+    worker1_ci_user: "##WORKER1_CI_USER##"
+    worker1_ci_password: "##WORKER1_CI_PASSWORD##"
+
+    worker2_ci_user: "##WORKER2_CI_USER##"
+    worker2_ci_password: "##WORKER2_CI_PASSWORD##"
+
+    port_forwarding: "##PORT_FORWARDING##"
+    bridge: "##BRIDGE##"
+
+    storage_1: "gluster1"
+    storage_2: "gluster2"
+
+  tasks:
+  - name: Network - Copy new /etc/hosts
+    ansible.builtin.template:
+      src: files/hosts
+      dest: /etc/hosts
+    register: hosts
+  - name: Restart network
+    when: hosts is succeeded
+    ansible.builtin.shell: /etc/init.d/networking restart
+    register: restartnetwork
+
+  - name: Iptables - Configuration Main
+    when: (inventory_hostname == groups['proxmoxnodes'][0]) and (restartnetwork is succeeded)
+    ansible.builtin.shell: |
+      iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 24007:24008 -j ACCEPT
+      iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 49152 -j ACCEPT
+      iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 111 -j ACCEPT
+      iptables -I INPUT -m state --state NEW -m udp -p udp --dport 111 -j ACCEPT
+      iptables -t nat -A POSTROUTING -s '{{ main_nat_ip }}/24' -o {{ bridge }} -j MASQUERADE
+      iptables -t nat -D POSTROUTING -s '{{ main_nat_ip }}/24' -o {{ bridge }} -j MASQUERADE
+      iptables-save
+      echo 1 > /proc/sys/net/ipv4/ip_forward
+    register: iptablemain
+
+  - name: Iptables - Configuration Worker1
+    when: (inventory_hostname == groups['proxmoxnodes'][1]) and (restartnetwork is succeeded)
+    ansible.builtin.shell: |
+      iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 24007:24008 -j ACCEPT
+      iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 49152 -j ACCEPT
+      iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 111 -j ACCEPT
+      iptables -I INPUT -m state --state NEW -m udp -p udp --dport 111 -j ACCEPT
+      iptables -t nat -A POSTROUTING -s '{{ worker1_nat_ip }}/24' -o {{ bridge }} -j MASQUERADE
+      iptables -t nat -D POSTROUTING -s '{{ worker1_nat_ip }}/24' -o {{ bridge }} -j MASQUERADE
+      iptables-save
+      echo 1 > /proc/sys/net/ipv4/ip_forward
+    register: iptableworker1
+
+  - name: Iptables - Configuration Worker2
+    when: (inventory_hostname == groups['proxmoxnodes'][2]) and (restartnetwork is succeeded)
+    ansible.builtin.shell: |
+      iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 24007:24008 -j ACCEPT
+      iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 49152 -j ACCEPT
+      iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 111 -j ACCEPT
+      iptables -I INPUT -m state --state NEW -m udp -p udp --dport 111 -j ACCEPT
+      iptables -t nat -A POSTROUTING -s '{{ worker2_nat_ip }}/24' -o {{ bridge }} -j MASQUERADE
+      iptables -t nat -D POSTROUTING -s '{{ worker2_nat_ip }}/24' -o {{ bridge }} -j MASQUERADE
+      iptables-save
+      echo 1 > /proc/sys/net/ipv4/ip_forward
+    register: iptableworker2
+
+  - name: Copy pve-entreprise.list
+    when: (iptablemain is succeeded) and (iptableworker1 is succeeded) and (iptableworker2 is succeeded)
+    ansible.builtin.template:
+      src: files/pve-entreprise.list
+      dest: /etc/apt/sources.list.d/pve-enterprise.list
+    register: pveent
+    
+  - name: Copy sources.list
+    when: (pveent is succeeded)
+    ansible.builtin.template:
+      src: files/sources.list
+      dest: /etc/apt/sources.list
+    register: sourceslist
+
+  - name: hostname - Main
+    when: (inventory_hostname == groups['proxmoxnodes'][0]) and (sourceslist is succeeded)
+    ansible.builtin.shell: |
+      hostnamectl set-hostname {{ main_hostname }}
+    register: hostnamemain
+
+  - name: hostname - Worker1
+    when: (inventory_hostname == groups['proxmoxnodes'][1]) and (sourceslist is succeeded)
+    ansible.builtin.shell: |
+      hostnamectl set-hostname {{ worker1_hostname }}
+    register: hostnameworker1
+
+  - name: hostname - Worker2
+    when: (inventory_hostname == groups['proxmoxnodes'][2]) and (sourceslist is succeeded)
+    ansible.builtin.shell: |
+      hostnamectl set-hostname {{ worker2_hostname }}
+    register: hostnameworker2
+
+  - name: Network - Install ifupdown2
+    when: (hostnamemain is succeeded) and (hostnameworker1 is succeeded) and (hostnameworker2 is succeeded)
+    ansible.builtin.shell: |
+      apt get update
+      apt get upgrade
+      apt install ifupdown2 -y
+    register: ifupdown2
+
+  - name: Network - edit /etc/network/interfaces
+    when: (ifupdown2 is succeeded)
+    ansible.builtin.shell: |
+      NAT="
+      \n\nauto vmbr1
+      \niface vmbr1 inet static
+      \n\taddress 192.168.0.254/24
+      \n\tbridge-ports none
+      \n\tbrdige-stp off
+      \n\tbridge-fd 0
+      \n\n\tpost-up echo 1 > /proc/sys/net/ipv4/ip_forward
+      \n\tpost-up iptables -t nat -A POSTROUTING -s '192.168.0.0/24' -o {{ bridge }} -j MASQUERADE
+      \n\tpost-down iptables -t nat -D POSTROUTING -s '192.168.0.0/24' -o {{ bridge }} -j MASQUERADE"
+
+      echo -e $NAT >> /etc/network/interfaces
+
+      /etc/init.d/networking restart 
+    register: networkinterfaces
+
+  - name: Cluster - creation
+    when: (inventory_hostname == groups['proxmoxnodes'][0]) and (networkinterfaces is succeeded)
+    ansible.builtin.shell: |
+      pvecm create ProxmoxCluster
+    register: clustercreation
+    ignore_errors: true
+
+  - name: Cluster - Cp script for joining with Worker1
+    #when: (inventory_hostname == groups['proxmoxnodes'][1]) and (clustercreation is succeeded)
+    when: (inventory_hostname == groups['proxmoxnodes'][1])
+    ansible.builtin.template:
+      src: scripts/join-cluster.sh
+      dest: /root
+    register: worker1cp
+  - name: Cluster - join cluster with worker1
+    when: (inventory_hostname == groups['proxmoxnodes'][1]) and (worker1cp is succeeded)
+    ansible.builtin.shell: |
+      rm -r /etc/pve/nodes/* || true
+      apt-get update
+      apt-get install expect -y
+      chmod +x /root/join-cluster.sh
+      /root/join-cluster.sh
+      rm /root/join-cluster.sh
+    register: clusterworker1
+
+  - name: Cluster - Cp script for joining with Worker2
+    #when: (inventory_hostname == groups['proxmoxnodes'][2]) and (clustercreation is succeeded)
+    when: (inventory_hostname == groups['proxmoxnodes'][2])
+    ansible.builtin.template:
+      src: scripts/join-cluster.sh
+      dest: /root
+    register: worker2cp
+  - name: Cluster - join cluster with worker2
+    when: (inventory_hostname == groups['proxmoxnodes'][2]) and (worker2cp is succeeded)
+    ansible.builtin.shell: |
+      rm -r /etc/pve/nodes/* || true
+      apt-get update
+      apt-get install expect -y
+      chmod +x /root/join-cluster.sh
+      /root/join-cluster.sh
+      rm /root/join-cluster.sh
+    register: clusterworker2
+
+  - name: HA - Group creation
+    when: (inventory_hostname == groups['proxmoxnodes'][0]) and (clusterworker2 is succeeded) and (clusterworker1 is succeeded)
+    ansible.builtin.shell: |
+      ha-manager groupadd MAIN -nodes "{{ main_worker1 }}:1,{{ main_worker2 }}:1,{{ main_main }}:5" --nofailback 0 --restricted 0
+      ha-manager groupadd WORKER1 -nodes "{{ main_worker1 }}:5,{{ main_worker2 }}:1,{{ main_main }}:1" --nofailback 0 --restricted 0
+      ha-manager groupadd WORKER2 -nodes "{{ main_worker1 }}:1,{{ main_worker2 }}:5,{{ main_main }}:1" --nofailback 0 --restricted 0
+    register: hacreation
+    ignore_errors: true
+
+  - name: Install GlusterFS and create folders gv0 gv1
+    #when: (hacreation is succeeded)
+    ansible.builtin.shell: |
+      apt-get update
+      apt install glusterfs-server -y
+      systemctl start glusterd.service
+      mkdir -p /data/brick1/gv0
+      mkdir -p /data/brick1/gv1
+    register: glustercreate
+    ignore_errors: true
+
+  - name : GlusterFS - Create volume gv0 & gv1
+    when: (inventory_hostname == groups['proxmoxnodes'][0])
+    #when: (inventory_hostname == groups['proxmoxnodes'][0]) and (hacreation is succeeded)
+    ansible.builtin.shell: |
+      gluster peer probe {{ main_hostname }}
+      gluster peer probe {{ worker1_hostname }}
+      gluster peer probe {{ worker2_hostname }}
+
+      gluster volume create gv0 replica 3 {{ main_hostname }}:/data/brick1/gv0 {{ worker1_hostname }}:/data/brick1/gv0 {{ worker2_hostname }}:/data/brick1/gv0 force
+      gluster volume start gv0
+      gluster volume profile gv0 start
+
+      gluster volume create gv1 replica 3 {{ main_hostname }}:/data/brick1/gv1 {{ worker1_hostname }}:/data/brick1/gv1 {{ worker2_hostname }}:/data/brick1/gv1 force
+      gluster volume start gv1
+      gluster volume profile gv1 start
+    register: GlusterFSvolumes
+    ignore_errors: true
+
+  - name : Add Gluster storage
+    when: (inventory_hostname == groups['proxmoxnodes'][0]) and (GlusterFSvolumes is succeeded)
+    ansible.builtin.shell: |
+      pvesm add glusterfs {{ storage_1 }} --server {{ main_ip }} --server2 {{ worker1_ip }} --volume gv0 --content images,iso
+      pvesm add glusterfs {{ storage_2 }} --server {{ worker1_ip }} --server2 {{ worker2_ip }} --volume gv1 --content backup,vztmpl,snippets
+    register: GlusterFSStorage
+    ignore_errors: true
+
+  - name: Cluster - disable local
+    when: (inventory_hostname == groups['proxmoxnodes'][0]) and (GlusterFSStorage is succeeded)
+    ansible.builtin.shell: |
+      pvesm set local --disable
+    register: disablelocal
+
+  - name: Qm template Main
+    when: (inventory_hostname == groups['proxmoxnodes'][0]) and (disablelocal is succeeded)
+    ansible.builtin.shell: |
+      wget https://cloud.centos.org/centos/7/images/CentOS-7-x86_64-GenericCloud.qcow2c
+      qm create 1234 --name "template-proxmox-main"  --net0 virtio,bridge=vmbr1 --ipconfig0 ip={{ main_nat_ip }}/24,gw=192.168.0.254 --autostart 1  
+      qm importdisk 1234 CentOS-7-x86_64-GenericCloud.qcow2c {{ storage_1 }}
+      qm set 1234 --memory 1024 --cores 1 --sockets 1 --cpu host
+      qm set 1234 --scsihw virtio-scsi-pci --scsi0 {{ storage_1 }}:1234/vm-1234-disk-0.raw,size=32,iothread=1
+      qm set 1234 --ide2 {{ storage_1 }}:cloudinit
+      qm set 1234 --boot c --bootdisk scsi0
+      qm set 1234 --serial0 socket --vga serial0
+      qm set 1234 --ciuser {{ main_ci_user }}
+      qm set 1234 --cipassword {{ main_ci_password }}
+      qm template 1234
+    register: qmmain
+    ignore_errors: true
+
+  - name: Qm template Worker1
+    when: inventory_hostname == groups['proxmoxnodes'][1]
+    ansible.builtin.shell: |
+      wget https://cloud.centos.org/centos/7/images/CentOS-7-x86_64-GenericCloud.qcow2c
+      qm create 1235 --name "template-proxmox-worker1"  --net0 virtio,bridge=vmbr1 --ipconfig0 ip={{ worker1_nat_ip }}/24,gw=192.168.0.254 --autostart 1  
+      qm importdisk 1235 CentOS-7-x86_64-GenericCloud.qcow2c {{ storage_1 }}
+      qm set 1235 --memory 1024 --cores 1 --sockets 1 --cpu host
+      qm set 1235 --scsihw virtio-scsi-pci --scsi0 {{ storage_1 }}:1235/vm-1235-disk-0.raw,size=32,iothread=1
+      qm set 1235 --ide2 {{ storage_1 }}:cloudinit
+      qm set 1235 --boot c --bootdisk scsi0
+      qm set 1235 --serial0 socket --vga serial0
+      qm set 1235 --ciuser {{ worker1_ci_user }}
+      qm set 1235 --cipassword {{ worker1_ci_password }}
+      qm template 1235
+    register: qmworker1
+    ignore_errors: true
+
+  - name: Qm template Worker2
+    when: inventory_hostname == groups['proxmoxnodes'][2]
+    ansible.builtin.shell: |
+      wget https://cloud.centos.org/centos/7/images/CentOS-7-x86_64-GenericCloud.qcow2c
+      qm create 1236 --name "template-proxmox-worker2"  --net0 virtio,bridge=vmbr1 --ipconfig0 ip={{ worker2_nat_ip }}/24,gw=192.168.0.254 --autostart 1  
+      qm importdisk 1236 CentOS-7-x86_64-GenericCloud.qcow2c {{ storage_1 }}
+      qm set 1236 --memory 1024 --cores 1 --sockets 1 --cpu host
+      qm set 1236 --scsihw virtio-scsi-pci --scsi0 {{ storage_1 }}:1236/vm-1236-disk-0.raw,size=32,iothread=1
+      qm set 1236 --ide2 {{ storage_1 }}:cloudinit
+      qm set 1236 --boot c --bootdisk scsi0
+      qm set 1236 --serial0 socket --vga serial0
+      qm set 1236 --ciuser {{ worker2_ci_user }}
+      qm set 1236 --cipassword {{ worker2_ci_password }}
+      qm template 1236
+    register: qmworker2
+    ignore_errors: true
+
+  - name: Port Forwarding vm main
+    when: (inventory_hostname == groups['proxmoxnodes'][0]) and (qmmain is succeeded)
+    ansible.builtin.shell: |
+      iptables -t nat -A PREROUTING -p tcp -i {{ bridge }} --dport {{ port_forwarding }} -j DNAT --to-destination {{ main_nat_ip }}:22
+      iptables-save
+
+  - name: Port Forwarding vm worker1
+    when: (inventory_hostname == groups['proxmoxnodes'][1]) and (qmworker1 is succeeded)
+    ansible.builtin.shell: |
+      iptables -t nat -A PREROUTING -p tcp -i {{ bridge }} --dport {{ port_forwarding }} -j DNAT --to-destination {{ worker1_nat_ip }}:22
+      iptables-save
+
+  - name: Port Forwarding vm worker2
+    when: (inventory_hostname == groups['proxmoxnodes'][2]) and (qmworker2 is succeeded)
+    ansible.builtin.shell: |
+      iptables -t nat -A PREROUTING -p tcp -i {{ bridge }} --dport {{ port_forwarding }} -j DNAT --to-destination {{ worker2_nat_ip }}:22
+      iptables-save

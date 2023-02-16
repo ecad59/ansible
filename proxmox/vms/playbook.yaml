@@ -1,0 +1,129 @@
+---
+- name: vms configuration
+  hosts: proxmoxvms
+  serial: 3
+
+  vars: 
+    vmmain_hostname: "##VMMAIN_HOSTNAME##"
+    vmworker1_hostname: "##VMWORKER1_HOSTNAME##"
+    vmworker2_hostname: "##VMWORKER2_HOSTNAME##"
+    tailscale_auth_key: "##TAILSCALE_AUTH_KEY##"
+    tailscale_vmmain: "##TAILSCALE_MAIN##"
+    tailscale_vmworker1: "##TAILSCALE_WORKER1##"
+    tailscale_vmworker2: "##TAILSCALE_WORKER2##"
+
+  tasks:
+    - name: tools
+      ansible.builtin.shell: |
+        yum install wget -y
+        yum install epel-release -y
+        yum install nano -y
+        yum install rsync lsof -y
+      register: tools
+
+    - name: hostname main
+      when: (inventory_hostname == groups['proxmoxvms'][0]) and (tools is succeeded)
+      ansible.builtin.shell: |
+        hostnamectl set-hostname {{ vmmain_hostname }}
+      register: hostnamemain
+
+    - name: hostname worker1
+      when: (inventory_hostname == groups['proxmoxvms'][1]) and (tools is succeeded)
+      ansible.builtin.shell: |
+        hostnamectl set-hostname {{ vmworker1_hostname }}
+      register: hostnameworker1
+
+    - name: hostname worker2
+      when: (inventory_hostname == groups['proxmoxvms'][2]) and (tools is succeeded)
+      ansible.builtin.shell: |
+        hostnamectl set-hostname {{ vmworker2_hostname }}
+      register: hostnameworker2
+
+    - name: Tailscale
+      when: (hostnamemain is succeeded) and (hostnameworker1 is succeeded) and (hostnameworker2 is succeeded)
+      ansible.builtin.shell: |
+        curl -fsSL https://tailscale.com/install.sh | sh
+        tailscale up --authkey {{ tailscale_auth_key }}
+      register: Tailscale
+
+    - name: Firewalld
+      when: (Tailscale is succeeded)
+      ansible.builtin.shell: |
+        systemctl stop firewalld
+        systemctl disable firewalld
+        systemctl mask --now firewalld
+      register: Firewalld
+
+    - name: Prepare Mariadb
+      when: (Firewalld is succeeded)
+      ansible.builtin.shell: |
+        iptables -A INPUT -i nat -m state --state NEW,ESTABLISHED,RELATED -s {{ tailscale_vmmain }} -p tcp -m multiport --dport 4567,4568,4444,3306 -j ACCEPT
+        iptables -A OUTPUT -o nat -m state --state ESTABLISHED,RELATED -d {{ tailscale_vmmain }} -p tcp -m multiport --sport 4567,4568,4444,3306 -j ACCEPT    
+        iptables -A INPUT -i nat -m state --state ESTABLISHED,RELATED -s {{ tailscale_vmmain }} -p tcp  -m multiport --sport 4567,4568,4444,3306 -j ACCEPT
+        iptables -A OUTPUT -o nat -m state --state NEW,ESTABLISHED,RELATED -d {{ tailscale_vmmain }} -p tcp  -m multiport --dports 4567,4568,4444,3306 -j ACCEPT
+
+        iptables -A INPUT -i nat -m state --state NEW,ESTABLISHED,RELATED -s {{ tailscale_vmworker1 }} -p tcp -m multiport --dport 4567,4568,4444,3306 -j ACCEPT
+        iptables -A OUTPUT -o nat -m state --state ESTABLISHED,RELATED -d {{ tailscale_vmworker1 }} -p tcp -m multiport --sport 4567,4568,4444,3306 -j ACCEPT    
+        iptables -A INPUT -i nat -m state --state ESTABLISHED,RELATED -s {{ tailscale_vmworker1 }} -p tcp  -m multiport --sport 4567,4568,4444,3306 -j ACCEPT
+        iptables -A OUTPUT -o nat -m state --state NEW,ESTABLISHED,RELATED -d {{ tailscale_vmworker1 }} -p tcp  -m multiport --dports 4567,4568,4444,3306 -j ACCEPT
+
+        iptables -A INPUT -i nat -m state --state NEW,ESTABLISHED,RELATED -s {{ tailscale_vmworker2 }} -p tcp -m multiport --dport 4567,4568,4444,3306 -j ACCEPT
+        iptables -A OUTPUT -o nat -m state --state ESTABLISHED,RELATED -d {{ tailscale_vmworker2 }} -p tcp -m multiport --sport 4567,4568,4444,3306 -j ACCEPT    
+        iptables -A INPUT -i nat -m state --state ESTABLISHED,RELATED -s {{ tailscale_vmworker2 }} -p tcp  -m multiport --sport 4567,4568,4444,3306 -j ACCEPT
+        iptables -A OUTPUT -o nat -m state --state NEW,ESTABLISHED,RELATED -d {{ tailscale_vmworker2 }} -p tcp  -m multiport --dports 4567,4568,4444,3306 -j ACCEPT
+
+        iptables-save
+      register: mariadbprep
+
+    - name: Install Mariadb
+      when: (mariadbprep is succeeded)
+      ansible.builtin.shell: |
+        wget https://downloads.mariadb.com/MariaDB/mariadb_repo_setup
+        chmod +x mariadb_repo_setup
+        sudo ./mariadb_repo_setup
+        yum update -y
+        yum install MariaDB-server -y
+        systemctl enable mariadb
+      register: mariadbinstall
+
+    - name: config Mariadb main
+      when: (inventory_hostname == groups['proxmoxvms'][0]) and (mariadbinstall is succeeded)
+      ansible.builtin.template:
+        src: files/server-main.cnf
+        dest: /etc/my.cnf.d/server.cnf
+      register: configmariadbmain
+
+    - name: config Mariadb worker1
+      when: (inventory_hostname == groups['proxmoxvms'][1]) and (mariadbinstall is succeeded)
+      ansible.builtin.template:
+        src: files/server-worker1.cnf
+        dest: /etc/my.cnf.d/server.cnf
+      register: configmariadbs1
+
+    - name: config Mariadb worker2
+      when: (inventory_hostname == groups['proxmoxvms'][2]) and (mariadbinstall is succeeded)
+      ansible.builtin.template:
+        src: files/server-worker2.cnf
+        dest: /etc/my.cnf.d/server.cnf
+      register: configmariadbs2
+
+    - name: logs Mariadb 
+      when: (configmariadbmain is succeeded) and (configmariadbs1 is succeeded) and (configmariadbs2 is succeeded)
+      ansible.builtin.shell: |
+        touch /var/log/mariadb.log
+        chown mysql:mysql /var/log/mariadb.log
+        sed -i 's/safe_to_bootstrap: 0/safe_to_bootstrap: 1/g' /var/lib/mysql/grastate.dat || true
+      register: logsmariadb
+
+    - name: Create galera cluster
+      when: (inventory_hostname == groups['proxmoxvms'][0]) and (logsmariadb is succeeded)
+      ansible.builtin.shell: galera_new_cluster
+      register: galera
+
+    - name: restart mariadb worker1
+      when: (inventory_hostname == groups['proxmoxvms'][1]) and (galera is succeeded)
+      ansible.builtin.shell: systemctl restart mariadb
+
+    - name: restart mariadb worker2
+      when: (inventory_hostname == groups['proxmoxvms'][2]) and (galera is succeeded)
+      ansible.builtin.shell: systemctl restart mariadb

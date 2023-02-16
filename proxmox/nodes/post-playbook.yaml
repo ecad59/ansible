@@ -1,0 +1,24 @@
+---
+- name: Nodes post configuration
+  hosts: proxmoxnodes
+  serial: 1
+  vars: 
+    vm_id_main: "##VM_ID_MAIN##"
+    vm_id_worker1: "##VM_ID_WORKER1##"
+    vm_id_worker2: "##VM_ID_WORKER2##"
+    storage: "##STORAGE##"
+    email: "##EMAIL##"
+  tasks:
+
+  - name: Enable HA
+    when: (inventory_hostname == groups['proxmoxnodes'][0])
+    ansible.builtin.shell: |
+      ha-manager add {{ vm_id_main }} --state started --max_relocate 3 --max_restart 3 --group MAIN
+      ha-manager add {{ vm_id_worker1 }} --state started --max_relocate 3 --max_restart 3 --group WORKER1
+      ha-manager add {{ vm_id_worker2 }} --state started --max_relocate 3 --max_restart 3 --group WORKER2
+    register: enableha
+
+  - name: Enable backup
+    when: (inventory_hostname == groups['proxmoxnodes'][0]) and (enableha is succeeded)
+    ansible.builtin.shell: |
+      pvesh create /cluster/backup -compress zstd -dow sun -enabled 1 -mailnotification always -mailto {{ email }} -mode snapshot -quiet 1 -starttime 01:00 -storage {{ storage }} -vmid {{ vm_id_main }},{{ vm_id_worker1 }},{{ vm_id_worker2 }}
